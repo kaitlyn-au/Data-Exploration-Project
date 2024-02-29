@@ -1,0 +1,147 @@
+---
+title: "Data Exploration Project"
+format: html
+editor: visual
+---
+
+Kaitlyn Au
+
+ECON4110
+
+### Data Cleaning:
+
+```{r}
+# Load in libraries
+library(rio)
+library(tidyverse)
+library(lubridate)
+library(vtable)
+library(fixest)
+library(ggplot2)
+library(lmtest)
+library(multcomp)
+```
+
+```{r}
+# Read in Google Trends data files
+
+filelist <- list.files('Lab3_Rawdata', pattern = 'trends', full.names = TRUE)
+my_data <- import_list(filelist, fill = TRUE, rbind = TRUE)
+```
+
+```{r}
+# Get first 10 characters out of the monthorweek variable
+my_data$monthorweek <- ymd(str_sub(my_data$monthorweek, end = 10))
+```
+
+This next code chunk will standardize the *index* variable by school and keyword, aggregate the *monthorweek* variable to months. I also decided to create a dummy variable where the months before the release of the College Scorecard (September 2015) would be 0 and after the release would be 1:
+
+```{r}
+my_data <- my_data %>% 
+  group_by(schname, keyword) %>%
+  mutate(index = (index - mean(index)) / sd(index), na.rm = TRUE) %>%
+  mutate(month = floor_date(monthorweek, 'month')) %>%
+  mutate(after_scorecard = ifelse(month >= "2015-09-01", 1, 0))
+```
+
+Then I filtered down the data to only include rows where the *index* variable is not NA and aggregate to the school--month level while also keeping the after_scorecard variable in mind. Then I got the averages of the indexes for each group. I decided to go to the school-month level because I wanted to see the effects of the mean index for low vs. high earning colleges after the release of the college scorecard in a specific **month** (9/2015). Keeping it at the week-keyword level is unnecessary as we don't need to see the specific changes week by week.
+
+```{r}
+my_data <- my_data %>%
+  filter(index != is.na(index)) %>%
+  group_by(schname, month, after_scorecard) %>%
+  summarize(mean_index = mean(index), na.rm = TRUE)
+```
+
+```{r}
+scorecard <- import("Lab3_RawData/Most+Recent+Cohorts+(Scorecard+Elements).csv")
+id_link <- import("Lab3_RawData/id_name_link.csv")
+```
+
+```{r}
+vtable(scorecard)
+
+# Filter scorecard to include only schools that primarily grant bachelor degrees (PREDDEG =3) & # only numerical values in the 
+# earnings column:
+
+scorecard <- scorecard %>%
+  filter(PREDDEG == 3) %>%
+  filter(`md_earn_wne_p10-REPORTED-EARNINGS` != "PrivacySuppressed") %>%
+  filter(`md_earn_wne_p10-REPORTED-EARNINGS` != "NULL")
+
+scorecard$`md_earn_wne_p10-REPORTED-EARNINGS` <- as.numeric(scorecard$`md_earn_wne_p10-REPORTED-EARNINGS`)
+
+mean(scorecard$`md_earn_wne_p10-REPORTED-EARNINGS`)
+
+```
+
+```{r}
+scorecard <- scorecard %>%
+  mutate(earnings_cat = ifelse(`md_earn_wne_p10-REPORTED-EARNINGS` > 42117, 1, 0))
+
+scorecard <- scorecard %>%
+  dplyr::select(UNITID, OPEID,PREDDEG, earnings_cat)
+```
+
+I decided to create a new dummy variable *earnings_cat* that will categorize the mean earnings by high or low based off of the average value of the median reported earnings. The average mean reported earning was \$42,116.98, but I decided to round it up because the numbers were originally reported as whole numbers. Any values of the reported earnings that were greater than \$42,117 were given a 1, while those below the average got a 0. It might have made more sense to make the cutoffs at the first and third quartiles to truly get a high/low rating, but that that could have possibly limited our data too much. Using the mean as the cutoff point works well as colleges can be considered "high-earning" if they are above the average, and "low-earning" if they are below the average.
+
+```{r}
+id_link <- id_link %>%
+  group_by(schname) %>% 
+  mutate(n = n()) %>%
+  filter(n == 1)
+```
+
+```{r}
+my_data <- inner_join(my_data, id_link, by = "schname") %>%
+  inner_join(id_link, scorecard, by = c("unitid", "opeid"))
+  
+my_data <- my_data %>%
+  mutate(UNITID = unitid) %>%
+  mutate(OPEID = opeid)
+  
+my_data <- full_join(my_data, scorecard, by = c("UNITID","OPEID")) 
+#did this full_join so that the earnings_cat column would be in the my_data
+
+my_data <- my_data %>%
+  filter(earnings_cat != is.na(earnings_cat)| earnings_cat == 0) %>%
+  filter(schname.x != is.na(schname.x))
+```
+
+## Data Analysis:
+
+```{r}
+# Regression of mean_index per month controlling for earnings category of the college (high/low)
+rmodel <- feols(mean_index ~ month + earnings_cat + after_scorecard + earnings_cat*after_scorecard, 
+           data = my_data, vcov = 'hetero')
+
+etable(rmodel)
+```
+
+I decided to set up a regression of *mean_index* on month while controlling for the earnings category of the college and whether the search occurred after the Scorecard release or not. I also included an interaction term with *earnings_cat* and *after_scorecard* that would allow me to see how the effect of *month* on *mean_index* (avgerage student interest) varies depending on the earnings category of the college and whether the observation was before or after the introduction of the College Scorecard. This interaction effectively answers the research question: Among colleges that predominantly grant bachelor's degrees, did the release of the College Scorecard shift student interest to high-earning colleges relative to low-earning ones?
+
+The scatterplot in the next code chunk is helping me visually inspect the data in my regression model for heteroskedasticity by plotting the residuals against the predicted values from my *rmodel* regression. I see that the residuals in this scatterplot have increased as the fitted values increase, which suggests there might be some heteroskedasticity, so I added *vcov = 'hetero'* into my regression model (*rmodel*), which will adjust the standard errors to account for the potential heteroskedasticity I saw in the residuals. The results from a bptest(*rmodel*) in R would have been better to test for heteroskedasticity, but it wouldn't work.
+
+Looking at the results from the regression, all the variables are statistically significant at a high confidence level (0.001 = \*\*\*), suggesting that they are important predictors of the *mean_index*. We can see that a one unit increase in *month*, decreases *mean_index* by 0.0009 units, while holding all other variables constant. A one unit increase in the earnings category for colleges (1 = high-earning college), increases the *mean_index* by 0.0246, holding all other variables constant. A one unit increase in after_scorecard increases the mean_index by 0.3062, holding all other variables constant. The interaction term suggests that the relationship between a one-unit increase in *earnings_cat* and *mean_index* differs before and after the College Scorecard was introduced. Before the introduction of the College Scorecard, the association between a one-unit increase in earnings_cat (high-earning vs. low-earning colleges) and mean_index was -0.0009. However, after the Scorecard, this association changes to (-0.0009-0.1075)= -0.1084. Therefore, the relationship between *earnings_cat* and *mean_index* became 0.1075 more negative after the Scorecard was introduced than before. The coefficient for the interaction term is also statistically significant at the 0.001 level (\*\*\*), indicating that the effect of *earnings_cat* on *mean_index* differs significantly before and after the introduction of the College Scorecard.
+
+Overall, the introduction of the College Scorecard decreased search activity on Google Trends for colleges with high-earning graduates by 0.1075 units relative to what it did for colleges with low-earning graduates, with a standard error of 0.0123. This result comes from the *earnings_cat\*after_scorecard* coefficient in the regression.
+
+```{r}
+residuals <- residuals(rmodel)
+fitted_values <- fitted(rmodel)
+ggplot(data.frame(residuals = residuals, fitted = fitted_values), 
+       aes(x = fitted, y = residuals^2)) + 
+  geom_point() +
+  geom_smooth()
+```
+
+```{r}
+ggplot(my_data, aes(x = month, y = mean_index, vcov = 'hetero')) +
+  geom_point(aes(color = earnings_cat)) +
+  geom_smooth(method = "lm", color = "red") + 
+  geom_vline(xintercept = as.Date("2015-09-01"), linetype = "dashed", 
+             color = "red") + 
+  facet_wrap(~ earnings_cat)
+```
+
+The graphs above are showing the change in mean_index by month for the colleges in the data from March 2013-2016. The graph on the left in black shows the low earning colleges and the graph on the right in blue is the high-earning colleges. The red dashed line is marking the month when the College Scorecard was introduced.
